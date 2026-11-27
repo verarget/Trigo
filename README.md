@@ -45,19 +45,28 @@ gcloud compute backend-services get-health web-backend --global --project=qwikla
 Run the CPU stress script from Git Bash or a Linux shell:
 
 ```sh
-PROJECT_ID=qwiklabs-gcp-04-4265379245a7 bash scripts/stress.sh
+PROJECT_ID=YOUR_PROJECT_ID bash scripts/stress.sh
 ```
 
 The script discovers running VMs every 30 seconds for 15 minutes and starts a
 120-second CPU load on each VM if one is not already running. SSH connections run
-sequentially so initial key generation cannot race. On Windows, PuTTY may ask you
-to verify and cache each VM's host key on the first connection. `--quiet` controls
-gcloud prompts; it does not suppress PuTTY's host-key prompt. Confirm the key only
-after verifying that it belongs to the intended VM. Stop an old script run with
+sequentially so initial key generation cannot race. On Windows, gcloud's
+`ssh/putty_force_connect` setting normally answers Plink's host-key prompt
+automatically. You may see `Store key in cache?` immediately followed by command
+output, without an opportunity to type `y`. Look for `SSH succeeded` or the actual
+connection error after that prompt. If automatic confirmation is disabled, verify
+the host key before accepting it interactively. Stop an old script run with
 `Ctrl+C` before restarting it.
 
-Override `ZONE`, `MIG`, `DURATION`, or `INTERVAL` as needed. `DURATION` and `INTERVAL`
-are positive numbers of seconds. If `PROJECT_ID` is omitted, gcloud uses its
-configured project. The script strips Windows carriage returns from VM names and
-stops on listing or SSH errors so failures remain visible. After stopping the
-script, an already started remote CPU load can continue for up to 120 seconds.
+New autoscaled VMs can be `RUNNING` before SSH and package installation are ready.
+The script retries a failed connection or missing `stress-ng` up to six times,
+waiting ten seconds between attempts. Override `SSH_RETRIES` and
+`SSH_RETRY_DELAY` to adjust this behavior. Retries and foreground SSH can extend
+the requested duration; an in-progress connection is allowed to finish.
+
+Override `ZONE`, `MIG`, `DURATION`, or `INTERVAL` as needed. The duration, interval,
+retry count, and retry delay must be positive integers. If `PROJECT_ID` is omitted,
+gcloud uses its configured project. The script strips Windows carriage returns
+from VM names and stops on listing errors or after exhausting SSH retries, so
+failures remain visible. After stopping the script, an already started remote CPU
+load can continue for up to 120 seconds.

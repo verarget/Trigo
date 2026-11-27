@@ -6,10 +6,12 @@ ZONE="${ZONE:-us-east1-c}"
 MIG="${MIG:-web-mig}"
 DURATION="${DURATION:-900}"
 INTERVAL="${INTERVAL:-30}"
+SSH_RETRIES="${SSH_RETRIES:-6}"
+SSH_RETRY_DELAY="${SSH_RETRY_DELAY:-10}"
 
-for SETTING in DURATION INTERVAL; do
+for SETTING in DURATION INTERVAL SSH_RETRIES SSH_RETRY_DELAY; do
     if [[ ! "${!SETTING}" =~ ^[1-9][0-9]*$ ]]; then
-        printf '%s must be a positive number of seconds.\n' "$SETTING" >&2
+        printf '%s must be a positive integer.\n' "$SETTING" >&2
         exit 1
     fi
 done
@@ -43,23 +45,49 @@ while [ "$SECONDS" -lt "$END" ]; do
             exit 1
         fi
 
-        printf 'Ensuring CPU stress is running on %s...\n' "$VM"
-        # Foreground connections serialize key generation and allow first-use
-        # host-key verification. Only the remote stress process is backgrounded.
-        if ! gcloud compute ssh "$VM" \
-            --zone="$ZONE" \
-            --tunnel-through-iap \
-            "${GCLOUD_FLAGS[@]}" \
-            --command="
+        # RUNNING instances can still be starting SSH or installing stress-ng.
+        SSH_SUCCEEDED=false
+        for (( ATTEMPT=1; ATTEMPT<=SSH_RETRIES; ATTEMPT++ )); do
+            printf 'Connecting to %s (attempt %s/%s)...\n' "$VM" "$ATTEMPT" "$SSH_RETRIES"
+            # Serialize SSH so key generation cannot race. Windows gcloud may
+            # automatically answer Plink's host-key prompt, then keep going.
+            if gcloud compute ssh "$VM" \
+                --zone="$ZONE" \
+                --tunnel-through-iap \
+                "${GCLOUD_FLAGS[@]}" \
+                --command="
+                command -v stress-ng >/dev/null 2>&1 || {
+                    echo 'stress-ng is not installed yet; waiting for VM startup.' >&2
+                    exit 75
+                }
                 if ! pgrep -x stress-ng >/dev/null; then
                     nohup stress-ng \
                         --cpu 0 \
                         --cpu-load 100 \
                         --timeout 120s \
                         >/tmp/stress.log 2>&1 </dev/null &
+                    echo 'Started CPU stress for 120 seconds.'
+                else
+                    echo 'CPU stress is already running.'
                 fi
             "; then
-            printf 'SSH failed for %s; resolve the connection error before retrying.\n' "$VM" >&2
+                printf '\nSSH succeeded on %s.\n' "$VM"
+                SSH_SUCCEEDED=true
+                break
+            fi
+
+            printf '\nSSH or VM setup is not ready on %s.\n' "$VM" >&2
+            if (( ATTEMPT < SSH_RETRIES )); then
+                printf 'Retrying in %s seconds...\n' "$SSH_RETRY_DELAY" >&2
+                sleep "$SSH_RETRY_DELAY"
+            fi
+        done
+
+        if [[ "$SSH_SUCCEEDED" != true ]]; then
+            printf 'SSH failed for %s after %s attempts.\n' "$VM" "$SSH_RETRIES" >&2
+            printf 'Run: gcloud compute ssh %q --zone=%q --tunnel-through-iap --troubleshoot' "$VM" "$ZONE" >&2
+            printf ' %q' "${GCLOUD_FLAGS[@]}" >&2
+            printf '\n' >&2
             exit 1
         fi
 
